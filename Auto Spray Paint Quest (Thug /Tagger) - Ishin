@@ -1,0 +1,652 @@
+--[[
+    Auto Spray Paint Quest (Thug / Tagger) - Ishin
+    ระบบพ่นสเปรย์ตามจุดที่ NPC Thug กำหนดแบบอัตโนมัติ 100% พร้อม UI
+    รองรับ Auto-Loop, ตรวจจับ Cooldown และระบุตำแหน่งผนังแม่นยำ
+    สร้างโดย Antigravity MCP
+]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local pgui = player:WaitForChild("PlayerGui")
+
+-- References
+local function getThug()
+    return Workspace:FindFirstChild("SprayPaintQuest", true)
+end
+
+local function getGraffitiFolder()
+    return Workspace:FindFirstChild("GraffitiParts", true)
+end
+
+local function getMuiPrompt()
+    return pgui:FindFirstChild("MultiOptionProximityPromptUI")
+end
+
+local function getDialogue()
+    return pgui:FindFirstChild("NPCDialogue", true)
+end
+
+local function getQuestContainer()
+    return pgui:FindFirstChild("QuestContainer", true)
+end
+
+-- State variables
+local running = false
+local loopEnabled = true
+local currentStep = "พร้อมทำงาน"
+local logs = {}
+local completedInSession = 0
+
+local function addLog(msg)
+    local t = os.date("%H:%M:%S")
+    table.insert(logs, 1, string.format("[%s] %s", t, msg))
+    if #logs > 35 then table.remove(logs) end
+end
+
+local function unsitPlayer()
+    local char = player.Character
+    local hum = char and char:FindFirstChild("Humanoid")
+    if hum and hum.Sit then
+        hum.Sit = false
+        hum.Jump = true
+        task.wait(0.2)
+    end
+end
+
+local function equipSprayCan()
+    local char = player.Character
+    if not char then return false end
+    local hum = char:FindFirstChild("Humanoid")
+    if char:FindFirstChild("Spray Can") then return true end
+    local bp = player:FindFirstChild("Backpack")
+    local tool = bp and bp:FindFirstChild("Spray Can")
+    if tool and hum then
+        hum:EquipTool(tool)
+        task.wait(0.25)
+        return true
+    end
+    return false
+end
+
+-- หาผนังที่ NPC กำหนด (Indicator.Enabled == true)
+local function getDesignatedWalls()
+    local folder = getGraffitiFolder()
+    if not folder then return {} end
+    local list = {}
+    for _, wall in ipairs(folder:GetChildren()) do
+        local ind = wall:FindFirstChild("GraffitiIndicator")
+        if ind and ind.Enabled then
+            table.insert(list, wall)
+        end
+    end
+    return list
+end
+
+-- คุยกับ NPC Thug
+local function talkToThug()
+    currentStep = "กำลังไปหา NPC Thug..."
+    addLog("เดินทางไปหา NPC Thug")
+    unsitPlayer()
+
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local thug = getThug()
+    if not root or not thug or not thug:FindFirstChild("HumanoidRootPart") then
+        addLog("❌ ไม่พบ NPC Thug ในเซิร์ฟเวอร์")
+        return false
+    end
+
+    -- หันหน้าเข้าหา Thug
+    root.CFrame = thug.HumanoidRootPart.CFrame * CFrame.new(0, 0, -3.2) * CFrame.Angles(0, math.rad(180), 0)
+
+    -- หันกล้องไปที่ Thug เพื่อให้ปุ่ม [E] Talk ปรากฏแน่นอน
+    local thugTarget = thug:FindFirstChild("Head") or thug.HumanoidRootPart
+    local camConn = RunService.RenderStepped:Connect(function()
+        local camera = workspace.CurrentCamera
+        if camera and root then
+            local camPos = root.Position + Vector3.new(0, 1.8, 0) + (root.CFrame.LookVector * -2.5)
+            camera.CFrame = CFrame.lookAt(camPos, thugTarget.Position)
+        end
+    end)
+
+    task.wait(0.4)
+
+    -- กดปุ่ม Talk
+    local dialogue = getDialogue()
+    local opened = dialogue and dialogue.Visible == true
+
+    if not opened then
+        local mui = getMuiPrompt()
+        local btn = mui and mui:FindFirstChild("Button", true)
+        local lbl = btn and btn:FindFirstChild("Label")
+
+        for _ = 1, 15 do
+            if dialogue and dialogue.Visible then
+                opened = true
+                break
+            end
+            if mui and mui.Enabled and btn and lbl and lbl.Text == "Talk" then
+                for _, c in ipairs(getconnections(btn.Activated)) do
+                    c.Function()
+                end
+                opened = true
+                break
+            end
+            task.wait(0.15)
+        end
+    end
+
+    camConn:Disconnect()
+
+    if not opened then
+        addLog("⚠️ ไม่สามารถกดคุยได้ กำลังลองใหม่...")
+        return false
+    end
+
+    task.wait(0.4)
+
+    -- ขั้นตอนที่ 1: หาตัวเลือกที่เขียนว่า "Give me the can."
+    local dialogue = getDialogue()
+    local bg = dialogue and dialogue:FindFirstChild("Background")
+
+    for _ = 1, 20 do
+        if dialogue and dialogue.Visible and bg then
+            local foundOpt = nil
+            for _, opt in ipairs(bg:GetChildren()) do
+                if opt:IsA("ImageButton") and opt.Name:find("DialogueOption") and opt.Visible then
+                    local optLbl = opt:FindFirstChild("DialogueLabel")
+                    if optLbl and optLbl.Text:lower():find("give me") then
+                        foundOpt = opt
+                        break
+                    end
+                end
+            end
+            if foundOpt then
+                for _, c in ipairs(getconnections(foundOpt.MouseButton1Click)) do
+                    c.Function()
+                end
+                addLog("เลือก: Give me the can.")
+                break
+            end
+        end
+        task.wait(0.15)
+    end
+
+    task.wait(0.4)
+
+    -- ขั้นตอนที่ 2: หาตัวเลือกที่เขียนว่า "Right." หรือกดยืนยันเริ่มเควส
+    for _ = 1, 20 do
+        if not dialogue or not dialogue.Visible then break end
+        if bg then
+            local foundOpt = nil
+            for _, opt in ipairs(bg:GetChildren()) do
+                if opt:IsA("ImageButton") and opt.Name:find("DialogueOption") and opt.Visible then
+                    local optLbl = opt:FindFirstChild("DialogueLabel")
+                    if optLbl and (optLbl.Text:lower():find("right") or optLbl.Text:lower():find("sure") or optLbl.Text:lower():find("okay")) then
+                        foundOpt = opt
+                        break
+                    end
+                end
+            end
+            if foundOpt then
+                for _, c in ipairs(getconnections(foundOpt.MouseButton1Click)) do
+                    c.Function()
+                end
+                addLog("เลือก: " .. (foundOpt:FindFirstChild("DialogueLabel") and foundOpt.DialogueLabel.Text or "ยืนยัน"))
+                break
+            end
+        end
+        task.wait(0.15)
+    end
+
+    task.wait(0.6)
+    return true
+end
+
+-- พ่นผนัง 1 จุด
+local function sprayWall(wall)
+    if not wall then return false end
+    unsitPlayer()
+    equipSprayCan()
+
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    local decal = wall:FindFirstChild("Decal")
+    local normal = decal and wall.CFrame:VectorToWorldSpace(Vector3.FromNormalId(decal.Face)) or wall.CFrame.LookVector
+
+    local success = false
+    -- ลองระยะ 2.8, 2.2, 3.4 studs
+    for _, dist in ipairs({2.8, 2.2, 3.4}) do
+        local standPos = wall.Position + (normal * dist)
+        root.CFrame = CFrame.lookAt(Vector3.new(standPos.X, wall.Position.Y, standPos.Z), wall.Position)
+
+        -- หันมุมกล้องมองตรงไปที่ผนัง เพื่อให้ไอคอน [E] ปรากฏขึ้นมาแน่นอน
+        local camConn = RunService.RenderStepped:Connect(function()
+            local camera = workspace.CurrentCamera
+            if camera and root then
+                local camPos = root.Position + Vector3.new(0, 1.8, 0) + (normal * 2.2)
+                camera.CFrame = CFrame.lookAt(camPos, wall.Position)
+            end
+        end)
+
+        task.wait(0.35)
+
+        for _ = 1, 15 do
+            local mui = getMuiPrompt()
+            local btn = mui and mui:FindFirstChild("Button", true)
+            local lbl = btn and btn:FindFirstChild("Label")
+            if mui and mui.Enabled and btn and lbl and lbl.Text == "Spray" then
+                for _, c in ipairs(getconnections(btn.Activated)) do
+                    c.Function()
+                end
+                success = true
+                break
+            end
+            task.wait(0.1)
+        end
+
+        camConn:Disconnect()
+        if success then break end
+    end
+
+    if success then
+        task.wait(0.8) -- รอเซิร์ฟเวอร์ตอบรับและเคลียร์สถานะผนัง
+    end
+    return success
+end
+
+-- วงจรทำงานหลักแบบสมบูรณ์ (ไม่มีการรอคูลดาวน์ ทำต่อเนื่องได้เรื่อยๆ)
+local function mainWorkflow()
+    if running then return end
+    running = true
+
+    while running do
+        local hasCan = equipSprayCan()
+        local designated = getDesignatedWalls()
+
+        -- ถ้าไม่มีกระป๋องสเปรย์ หรือไม่มีผนังที่กำหนด -> ไปคุยกับ Thug ทันที ไม่รอคูลดาวน์
+        if not hasCan or #designated == 0 then
+            currentStep = "กำลังไปคุยรับเควสและสเปรย์จาก Thug..."
+            local ok = talkToThug()
+            if not ok then
+                task.wait(1)
+            else
+                task.wait(0.5)
+            end
+            hasCan = equipSprayCan()
+            designated = getDesignatedWalls()
+        end
+
+        if not running then break end
+
+        -- ถ้ามีกระป๋องสเปรย์ และมีผนังที่กำหนด
+        if #designated > 0 then
+            addLog(string.format("เริ่มพ่นผนังที่กำหนด %d จุด", #designated))
+            for idx, wall in ipairs(designated) do
+                if not running then break end
+                currentStep = string.format("กำลังพ่นจุดที่ %d/%d (%s)", idx, #designated, wall.Name)
+                addLog(string.format("-> เดินทางไป %s", wall.Name))
+
+                local sprayed = sprayWall(wall)
+                if sprayed then
+                    completedInSession = completedInSession + 1
+                    addLog(string.format("✅ พ่นสำเร็จ: %s", wall.Name))
+                else
+                    addLog(string.format("⚠️ พ่นไม่สำเร็จ: %s", wall.Name))
+                end
+                task.wait(0.3)
+            end
+        end
+
+        if not loopEnabled then
+            addLog("เสร็จสิ้น 1 รอบ (ปิด Auto-Loop ไว้)")
+            break
+        end
+
+        currentStep = "จบเควส กำลังไปรับเควสรอบต่อไป..."
+        task.wait(0.5)
+    end
+
+    running = false
+    currentStep = "หยุดการทำงาน"
+    addLog("ระบบหยุดการทำงานแล้ว")
+end
+
+-- ============================================================
+-- GUI INTERFACE
+-- ============================================================
+local old = pgui:FindFirstChild("ThugAutoSprayGui")
+if old then old:Destroy() end
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "ThugAutoSprayGui"
+sg.ResetOnSpawn = false
+sg.DisplayOrder = 9999
+sg.Parent = pgui
+
+-- Main Container
+local main = Instance.new("Frame")
+main.Name = "MainFrame"
+main.Size = UDim2.new(0, 360, 0, 480)
+main.Position = UDim2.new(0, 25, 0.5, -240)
+main.BackgroundColor3 = Color3.fromRGB(15, 17, 26)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = sg
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = main
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(80, 150, 255)
+stroke.Thickness = 1.6
+stroke.Parent = main
+
+-- Dragging
+local dragging, dragStart, startPos
+main.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+main.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
+        local delta = input.Position - dragStart
+        main.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- Title Bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 46)
+titleBar.BackgroundColor3 = Color3.fromRGB(35, 95, 215)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+
+local tbCorner = Instance.new("UICorner")
+tbCorner.CornerRadius = UDim.new(0, 14)
+tbCorner.Parent = titleBar
+
+local tbPatch = Instance.new("Frame")
+tbPatch.Size = UDim2.new(1, 0, 0.5, 0)
+tbPatch.Position = UDim2.new(0, 0, 0.5, 0)
+tbPatch.BackgroundColor3 = Color3.fromRGB(35, 95, 215)
+tbPatch.BorderSizePixel = 0
+tbPatch.Parent = titleBar
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Text = "🎨 Thug Quest Auto Spray"
+titleLbl.Size = UDim2.new(1, -60, 1, 0)
+titleLbl.Position = UDim2.new(0, 14, 0, 0)
+titleLbl.Font = Enum.Font.GothamBold
+titleLbl.TextSize = 15
+titleLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.BackgroundTransparency = 1
+titleLbl.Parent = titleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Text = "✕"
+closeBtn.Size = UDim2.new(0, 32, 0, 32)
+closeBtn.Position = UDim2.new(1, -40, 0, 7)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 13
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+closeBtn.BorderSizePixel = 0
+closeBtn.Parent = titleBar
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+closeBtn.MouseButton1Click:Connect(function()
+    running = false
+    sg:Destroy()
+end)
+
+-- Content
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -24, 1, -60)
+content.Position = UDim2.new(0, 12, 0, 52)
+content.BackgroundTransparency = 1
+content.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.FillDirection = Enum.FillDirection.Vertical
+layout.Padding = UDim.new(0, 8)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = content
+
+-- Status Card
+local statusCard = Instance.new("Frame")
+statusCard.Size = UDim2.new(1, 0, 0, 48)
+statusCard.BackgroundColor3 = Color3.fromRGB(24, 28, 44)
+statusCard.BorderSizePixel = 0
+statusCard.LayoutOrder = 1
+statusCard.Parent = content
+Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 8)
+
+local statusTitle = Instance.new("TextLabel")
+statusTitle.Text = "สถานะปัจจุบัน:"
+statusTitle.Size = UDim2.new(1, -16, 0, 16)
+statusTitle.Position = UDim2.new(0, 10, 0, 6)
+statusTitle.Font = Enum.Font.Gotham
+statusTitle.TextSize = 11
+statusTitle.TextColor3 = Color3.fromRGB(150, 165, 190)
+statusTitle.TextXAlignment = Enum.TextXAlignment.Left
+statusTitle.BackgroundTransparency = 1
+statusTitle.Parent = statusCard
+
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Text = "⏸ พร้อมเริ่มงาน"
+statusLbl.Size = UDim2.new(1, -16, 0, 20)
+statusLbl.Position = UDim2.new(0, 10, 0, 24)
+statusLbl.Font = Enum.Font.GothamBold
+statusLbl.TextSize = 13
+statusLbl.TextColor3 = Color3.fromRGB(90, 220, 120)
+statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+statusLbl.BackgroundTransparency = 1
+statusLbl.Parent = statusCard
+
+-- Info Display (Points & Quest)
+local infoFrame = Instance.new("Frame")
+infoFrame.Size = UDim2.new(1, 0, 0, 36)
+infoFrame.BackgroundColor3 = Color3.fromRGB(24, 28, 44)
+infoFrame.BorderSizePixel = 0
+infoFrame.LayoutOrder = 2
+infoFrame.Parent = content
+Instance.new("UICorner", infoFrame).CornerRadius = UDim.new(0, 8)
+
+local pointsLbl = Instance.new("TextLabel")
+pointsLbl.Text = "📍 จุดที่ Thug กำหนด: 0 จุด"
+pointsLbl.Size = UDim2.new(0.55, -8, 1, 0)
+pointsLbl.Position = UDim2.new(0, 10, 0, 0)
+pointsLbl.Font = Enum.Font.Gotham
+pointsLbl.TextSize = 12
+pointsLbl.TextColor3 = Color3.fromRGB(210, 220, 240)
+pointsLbl.TextXAlignment = Enum.TextXAlignment.Left
+pointsLbl.BackgroundTransparency = 1
+pointsLbl.Parent = infoFrame
+
+local questLbl = Instance.new("TextLabel")
+questLbl.Text = "เควส: -/-"
+questLbl.Size = UDim2.new(0.45, -12, 1, 0)
+questLbl.Position = UDim2.new(0.55, 0, 0, 0)
+questLbl.Font = Enum.Font.GothamBold
+questLbl.TextSize = 12
+questLbl.TextColor3 = Color3.fromRGB(255, 200, 70)
+questLbl.TextXAlignment = Enum.TextXAlignment.Right
+questLbl.BackgroundTransparency = 1
+questLbl.Parent = infoFrame
+
+-- Auto Loop Toggle
+local loopToggleFrame = Instance.new("Frame")
+loopToggleFrame.Size = UDim2.new(1, 0, 0, 32)
+loopToggleFrame.BackgroundTransparency = 1
+loopToggleFrame.LayoutOrder = 3
+loopToggleFrame.Parent = content
+
+local loopLbl = Instance.new("TextLabel")
+loopLbl.Text = "🔁 ทำเควสต่อเนื่องวนลูป (Auto Loop)"
+loopLbl.Size = UDim2.new(0.75, 0, 1, 0)
+loopLbl.Font = Enum.Font.Gotham
+loopLbl.TextSize = 12
+loopLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
+loopLbl.TextXAlignment = Enum.TextXAlignment.Left
+loopLbl.BackgroundTransparency = 1
+loopLbl.Parent = loopToggleFrame
+
+local loopBg = Instance.new("Frame")
+loopBg.Size = UDim2.new(0, 46, 0, 24)
+loopBg.Position = UDim2.new(1, -48, 0.5, -12)
+loopBg.BackgroundColor3 = Color3.fromRGB(35, 95, 215)
+loopBg.BorderSizePixel = 0
+loopBg.Parent = loopToggleFrame
+Instance.new("UICorner", loopBg).CornerRadius = UDim.new(1, 0)
+
+local loopDot = Instance.new("Frame")
+loopDot.Size = UDim2.new(0, 18, 0, 18)
+loopDot.Position = UDim2.new(0, 24, 0.5, -9)
+loopDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+loopDot.BorderSizePixel = 0
+loopDot.Parent = loopBg
+Instance.new("UICorner", loopDot).CornerRadius = UDim.new(1, 0)
+
+local loopBtn = Instance.new("TextButton")
+loopBtn.Text = ""
+loopBtn.Size = UDim2.new(1, 0, 1, 0)
+loopBtn.BackgroundTransparency = 1
+loopBtn.Parent = loopBg
+loopBtn.MouseButton1Click:Connect(function()
+    loopEnabled = not loopEnabled
+    TweenService:Create(loopBg, TweenInfo.new(0.2), {
+        BackgroundColor3 = loopEnabled and Color3.fromRGB(35, 95, 215) or Color3.fromRGB(50, 55, 70)
+    }):Play()
+    TweenService:Create(loopDot, TweenInfo.new(0.2), {
+        Position = UDim2.new(0, loopEnabled and 24 or 4, 0.5, -9)
+    }):Play()
+end)
+
+-- Main Buttons
+local function createButton(text, color, order)
+    local btn = Instance.new("TextButton")
+    btn.Text = text
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 13
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.BackgroundColor3 = color
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = order
+    btn.Parent = content
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 9)
+    return btn
+end
+
+local startBtn = createButton("▶ เริ่มทำงานอัตโนมัติ (คุย Thug -> พ่น)", Color3.fromRGB(35, 160, 85), 4)
+local talkOnlyBtn = createButton("💬 คุยกับ Thug อย่างเดียว (รับเควส/สเปรย์)", Color3.fromRGB(45, 110, 220), 5)
+local stopBtn = createButton("⏹ หยุดการทำงาน", Color3.fromRGB(200, 55, 55), 6)
+
+-- Log Box
+local logCard = Instance.new("Frame")
+logCard.Size = UDim2.new(1, 0, 0, 140)
+logCard.BackgroundColor3 = Color3.fromRGB(11, 13, 20)
+logCard.BorderSizePixel = 0
+logCard.LayoutOrder = 7
+logCard.Parent = content
+Instance.new("UICorner", logCard).CornerRadius = UDim.new(0, 8)
+
+local logStroke = Instance.new("UIStroke")
+logStroke.Color = Color3.fromRGB(40, 50, 75)
+logStroke.Thickness = 1
+logStroke.Parent = logCard
+
+local logScroll = Instance.new("ScrollingFrame")
+logScroll.Size = UDim2.new(1, -10, 1, -10)
+logScroll.Position = UDim2.new(0, 5, 0, 5)
+logScroll.BackgroundTransparency = 1
+logScroll.ScrollBarThickness = 3
+logScroll.ScrollBarImageColor3 = Color3.fromRGB(70, 95, 140)
+logScroll.Parent = logCard
+
+local logLayout = Instance.new("UIListLayout")
+logLayout.Padding = UDim.new(0, 3)
+logLayout.SortOrder = Enum.SortOrder.LayoutOrder
+logLayout.Parent = logScroll
+
+local logLabels = {}
+for i = 1, 9 do
+    local l = Instance.new("TextLabel")
+    l.Text = ""
+    l.Size = UDim2.new(1, -6, 0, 14)
+    l.Font = Enum.Font.Code
+    l.TextSize = 10
+    l.TextColor3 = Color3.fromRGB(110, 195, 125)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.BackgroundTransparency = 1
+    l.LayoutOrder = i
+    l.Parent = logScroll
+    table.insert(logLabels, l)
+end
+
+-- Update Loop
+RunService.Heartbeat:Connect(function()
+    statusLbl.Text = (running and "🔄 " or "⏸ ") .. currentStep
+
+    local activeWalls = getDesignatedWalls()
+    pointsLbl.Text = string.format("📍 จุดที่ Thug กำหนด: %d จุด", #activeWalls)
+
+    local qc = getQuestContainer()
+    local pLbl = qc and qc:FindFirstChild("ProgressLabel", true)
+    if pLbl and qc.Visible and pLbl.Text ~= "" then
+        questLbl.Text = string.format("เควส: %s", pLbl.Text)
+    else
+        questLbl.Text = "เควส: ทำต่อเนื่อง"
+    end
+
+    for i, lbl in ipairs(logLabels) do
+        lbl.Text = logs[i] or ""
+    end
+    logScroll.CanvasSize = UDim2.new(0, 0, 0, logLayout.AbsoluteContentSize.Y)
+end)
+
+-- Button Bindings
+startBtn.MouseButton1Click:Connect(function()
+    if running then return end
+    addLog("กดเริ่มทำงานอัตโนมัติ")
+    task.spawn(mainWorkflow)
+end)
+
+talkOnlyBtn.MouseButton1Click:Connect(function()
+    if running then return end
+    addLog("กดไปคุยกับ Thug")
+    task.spawn(function()
+        talkToThug()
+        currentStep = "คุยเสร็จแล้ว"
+    end)
+end)
+
+stopBtn.MouseButton1Click:Connect(function()
+    running = false
+    currentStep = "หยุดการทำงานแล้ว"
+    addLog("กดหยุดการทำงาน")
+end)
+
+-- Init
+addLog("ระบบ Auto Spray Thug Quest พร้อมใช้งาน")
+print("[ThugAutoSpray] โหลด UI สำเร็จ!")
